@@ -17,7 +17,18 @@ flowchart LR
 
 ### 1. Fork 本仓库
 
-### 2. 配置仓库变量和密钥
+### 2. 创建 Labels
+
+在仓库 **Issues → Labels** 中创建以下标签：
+
+| Label | 颜色建议 | 说明 |
+|-------|---------|------|
+| `mirror-request` | `#0075ca` | 镜像同步请求，由 Issue 模板自动添加，工作流依赖此标签触发 |
+| `completed` | `#0e8a16` | 同步完成，由工作流在全部镜像同步成功后自动添加 |
+
+> **注意**：`mirror-request` 标签必须手动创建，否则 Issue 模板无法自动打标签，工作流将不会触发。
+
+### 3. 配置仓库变量和密钥
 
 在仓库 **Settings → Secrets and variables → Actions** 中配置：
 
@@ -28,7 +39,7 @@ flowchart LR
 | `TARGET_REGISTRY_USER` | Variable | 仓库用户名 | `user@china` |
 | `TARGET_REGISTRY_PASSWORD` | Secret | 仓库密码 | - |
 
-### 3. 提交镜像同步请求
+### 4. 提交镜像同步请求
 
 通过 Issue 模板提交，每行一个镜像，**必须带 tag**：
 
@@ -41,7 +52,7 @@ quay.io/prometheus/node-exporter:v1.7.0
 
 可选勾选 **Sync all architectures** 同步所有架构。
 
-### 4. 等待同步完成
+### 5. 等待同步完成
 
 工作流会自动：
 - 校验镜像格式

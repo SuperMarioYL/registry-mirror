@@ -1,19 +1,22 @@
-name: Mirror Docker Images
-description: Submit a list of Docker images to mirror to the target registry
+name: Mirror Docker Images / 镜像同步请求
+description: Submit a list of Docker images to mirror / 提交需要同步的镜像列表
 title: "[mirror]"
 labels: ["mirror-request"]
 body:
   - type: markdown
     attributes:
       value: |
-        ## Image Mirror Request
-        Enter the Docker images you want to mirror, one per line.
-        Each image **must** include a tag (e.g., `nginx:latest`).
+        ## Image Mirror Request / 镜像同步请求
+
+        Enter the Docker images you want to mirror, one per line. Each image **must** include a tag.
+        请输入需要同步的镜像，每行一个，每个镜像**必须包含 tag**（如 `nginx:latest`）。
   - type: textarea
     id: images
     attributes:
-      label: Images
-      description: "One image per line. Format: [registry/][namespace/]image:tag"
+      label: Images / 镜像列表
+      description: |
+        One image per line. Format: [registry/][namespace/]image:tag
+        每行一个镜像，格式：[仓库地址/][命名空间/]镜像名:tag
       placeholder: |
         nginx:latest
         gcr.io/google-containers/pause:3.9
@@ -24,8 +27,10 @@ body:
   - type: checkboxes
     id: multiarch
     attributes:
-      label: Multi-architecture
-      description: "Should all architectures be synced? (default: current platform only)"
+      label: Multi-architecture / 多架构同步
+      description: |
+        By default, only linux/amd64 images are synced. Check below to sync all architectures (amd64, arm64, arm/v7, s390x, etc.).
+        默认只同步 linux/amd64 架构的镜像。如需同步所有架构（amd64、arm64、arm/v7、s390x 等），请勾选下方选项。
       options:
-        - label: "Sync all architectures (--all flag)"
+        - label: "Sync all architectures / 同步所有架构（适用于 ARM 服务器等多架构场景）"
           required: false
