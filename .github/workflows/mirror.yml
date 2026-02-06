@@ -1,0 +1,165 @@
+name: Mirror Docker Images
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+
+concurrency:
+  group: mirror-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  issues: write
+
+env:
+  TARGET_REGISTRY: ${{ vars.TARGET_REGISTRY }}
+  TARGET_NAMESPACE: ${{ vars.TARGET_NAMESPACE }}
+
+jobs:
+  mirror:
+    if: contains(github.event.issue.labels.*.name, 'mirror-request')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo > /dev/null
+          skopeo --version
+
+      - name: Extract images from issue
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+
+            // Extract the images textarea content
+            // GitHub Issue Forms renders textarea fields as content between the label header and next section
+            const lines = body.split('\n')
+              .map(l => l.trim())
+              .filter(l => {
+                if (!l || l.startsWith('#') || l.startsWith('_') || l.startsWith('-  [')) return false;
+                // Must look like an image reference (contains : for tag)
+                return /^[a-zA-Z0-9]/.test(l) && l.includes(':');
+              });
+
+            const multiArch = /- \[[xX]\] Sync all architectures/.test(body);
+
+            core.setOutput('images', lines.join('\n'));
+            core.setOutput('multi_arch', multiArch ? 'true' : 'false');
+            core.setOutput('count', lines.length.toString());
+
+            if (lines.length === 0) {
+              core.setFailed('No valid images found in issue body');
+            }
+
+      - name: Validate image format
+        id: validate
+        if: steps.extract.outcome == 'success'
+        run: |
+          echo '${{ steps.extract.outputs.images }}' | .github/scripts/validate.sh
+
+      - name: Post validation failure
+        if: failure() && steps.validate.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                '**Validation failed**',
+                '',
+                'Please ensure every image includes a tag.',
+                '',
+                'Correct format:',
+                '```',
+                'nginx:latest',
+                'gcr.io/google-containers/pause:3.9',
+                '```',
+                '',
+                'Images without tags (e.g., `nginx` without `:latest`) cannot be synced.'
+              ].join('\n')
+            });
+
+      - name: Post start comment
+        if: steps.validate.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const count = '${{ steps.extract.outputs.count }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `**Mirror started**\n\nProcessing ${count} image(s)...\n\n[View workflow run](${runUrl})`
+            });
+
+      - name: Run mirror sync
+        if: steps.validate.outcome == 'success'
+        id: sync
+        run: |
+          echo '${{ steps.extract.outputs.images }}' | \
+            .github/scripts/mirror.sh \
+              "${{ env.TARGET_REGISTRY }}" \
+              "${{ env.TARGET_NAMESPACE }}" \
+              "${{ vars.TARGET_REGISTRY_USER }}" \
+              "${{ secrets.TARGET_REGISTRY_PASSWORD }}" \
+              "${{ steps.extract.outputs.multi_arch }}"
+
+      - name: Post result comment
+        if: always() && steps.validate.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report;
+            try {
+              report = fs.readFileSync('/tmp/mirror-report.md', 'utf8');
+            } catch {
+              report = 'Could not read sync report. Check workflow logs for details.';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
+
+      - name: Update issue title
+        if: steps.extract.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const images = '${{ steps.extract.outputs.images }}'.split('\n').filter(Boolean);
+            const preview = images.slice(0, 3).join(', ');
+            const suffix = images.length > 3 ? ` (+${images.length - 3} more)` : '';
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              title: `[mirror] ${preview}${suffix}`
+            });
+
+      - name: Close issue on success
+        if: steps.sync.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed'
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['completed']
+            });

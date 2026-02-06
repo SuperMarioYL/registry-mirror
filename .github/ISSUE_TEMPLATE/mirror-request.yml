@@ -1,0 +1,31 @@
+name: Mirror Docker Images
+description: Submit a list of Docker images to mirror to the target registry
+title: "[mirror]"
+labels: ["mirror-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Image Mirror Request
+        Enter the Docker images you want to mirror, one per line.
+        Each image **must** include a tag (e.g., `nginx:latest`).
+  - type: textarea
+    id: images
+    attributes:
+      label: Images
+      description: "One image per line. Format: [registry/][namespace/]image:tag"
+      placeholder: |
+        nginx:latest
+        gcr.io/google-containers/pause:3.9
+        registry.k8s.io/kube-apiserver:v1.28.0
+        quay.io/prometheus/node-exporter:v1.7.0
+    validations:
+      required: true
+  - type: checkboxes
+    id: multiarch
+    attributes:
+      label: Multi-architecture
+      description: "Should all architectures be synced? (default: current platform only)"
+      options:
+        - label: "Sync all architectures (--all flag)"
+          required: false
