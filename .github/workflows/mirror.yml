@@ -86,6 +86,18 @@ jobs:
               ].join('\n')
             });
 
+      - name: Add in-progress label
+        if: steps.validate.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['running']
+            });
+
       - name: Post start comment
         if: steps.validate.outcome == 'success'
         uses: actions/github-script@v7
@@ -146,20 +158,27 @@ jobs:
               title: `[mirror] ${preview}${suffix}`
             });
 
-      - name: Close issue on success
+      - name: Label and close on success
         if: steps.sync.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              state: 'closed'
-            });
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: ['completed']
-            });
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            try {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'running' });
+            } catch {}
+            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['success'] });
+            await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });
+
+      - name: Label on failure
+        if: steps.sync.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            try {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'running' });
+            } catch {}
+            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['failed'] });
