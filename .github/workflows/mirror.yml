@@ -158,7 +158,7 @@ jobs:
               title: `[mirror] ${preview}${suffix}`
             });
 
-      - name: Label and close on success
+      - name: Label on success
         if: steps.sync.outcome == 'success'
         uses: actions/github-script@v7
         with:
@@ -169,7 +169,6 @@ jobs:
               await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'running' });
             } catch {}
             await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['success'] });
-            await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });
 
       - name: Label on failure
         if: steps.sync.outcome == 'failure'
