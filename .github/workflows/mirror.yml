@@ -34,21 +34,21 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
             const body = context.payload.issue.body || '';
 
-            // Extract the images textarea content
-            // GitHub Issue Forms renders textarea fields as content between the label header and next section
             const lines = body.split('\n')
               .map(l => l.trim())
               .filter(l => {
                 if (!l || l.startsWith('#') || l.startsWith('_') || l.startsWith('-  [')) return false;
-                // Must look like an image reference (contains : for tag)
                 return /^[a-zA-Z0-9]/.test(l) && l.includes(':');
               });
 
             const multiArch = /- \[[xX]\] Sync all architectures/.test(body);
 
-            core.setOutput('images', lines.join('\n'));
+            // Write images to file to avoid shell escaping issues
+            fs.writeFileSync('/tmp/images.txt', lines.join('\n'));
+
             core.setOutput('multi_arch', multiArch ? 'true' : 'false');
             core.setOutput('count', lines.length.toString());
 
@@ -60,7 +60,7 @@ jobs:
         id: validate
         if: steps.extract.outcome == 'success'
         run: |
-          echo '${{ steps.extract.outputs.images }}' | .github/scripts/validate.sh
+          .github/scripts/validate.sh < /tmp/images.txt
 
       - name: Post validation failure
         if: failure() && steps.validate.outcome == 'failure'
@@ -86,7 +86,7 @@ jobs:
               ].join('\n')
             });
 
-      - name: Add in-progress label
+      - name: Add running label
         if: steps.validate.outcome == 'success'
         uses: actions/github-script@v7
         with:
@@ -116,13 +116,13 @@ jobs:
         if: steps.validate.outcome == 'success'
         id: sync
         run: |
-          echo '${{ steps.extract.outputs.images }}' | \
-            .github/scripts/mirror.sh \
-              "${{ env.TARGET_REGISTRY }}" \
-              "${{ env.TARGET_NAMESPACE }}" \
-              "${{ vars.TARGET_REGISTRY_USER }}" \
-              "${{ secrets.TARGET_REGISTRY_PASSWORD }}" \
-              "${{ steps.extract.outputs.multi_arch }}"
+          .github/scripts/mirror.sh \
+            "${{ env.TARGET_REGISTRY }}" \
+            "${{ env.TARGET_NAMESPACE }}" \
+            "${{ vars.TARGET_REGISTRY_USER }}" \
+            "${{ secrets.TARGET_REGISTRY_PASSWORD }}" \
+            "${{ steps.extract.outputs.multi_arch }}" \
+            < /tmp/images.txt
 
       - name: Post result comment
         if: always() && steps.validate.outcome == 'success'
@@ -148,7 +148,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const images = '${{ steps.extract.outputs.images }}'.split('\n').filter(Boolean);
+            const fs = require('fs');
+            const images = fs.readFileSync('/tmp/images.txt', 'utf8').split('\n').filter(Boolean);
             const preview = images.slice(0, 3).join(', ');
             const suffix = images.length > 3 ? ` (+${images.length - 3} more)` : '';
             await github.rest.issues.update({
