@@ -6,7 +6,7 @@ on:
 
 concurrency:
   group: mirror-${{ github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   issues: write
@@ -175,12 +175,27 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: ['running']
-            });
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const statusLabels = new Set(['running', 'success', 'failed']);
+            const ensureLabel = async (name, color, description) => {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (error) {
+                if (error.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                  return;
+                }
+                throw error;
+              }
+            };
+
+            await ensureLabel('running', 'fbca04', 'Mirror sync in progress');
+
+            const issue = await github.rest.issues.get({ owner, repo, issue_number });
+            const existing = issue.data.labels.map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
+            const next = [...new Set([...existing.filter(name => !statusLabels.has(name)), 'running'])];
+            await github.rest.issues.setLabels({ owner, repo, issue_number, labels: next });
 
       - name: Post start comment
         if: steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
@@ -253,26 +268,44 @@ jobs:
               title: `[mirror] ${preview}${suffix}`
             });
 
-      - name: Label on success
-        if: always() && steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success' && steps.sync.outcome == 'success'
+      - name: Finalize status label
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
-            try {
-              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'running' });
-            } catch {}
-            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['success'] });
+            const statusLabels = new Set(['running', 'success', 'failed']);
 
-      - name: Label on failure
-        if: always() && steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success' && steps.sync.outcome != 'success'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            try {
-              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'running' });
-            } catch {}
-            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['failed'] });
+            const ensureLabel = async (name, color, description) => {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (error) {
+                if (error.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                  return;
+                }
+                throw error;
+              }
+            };
+
+            const extractOutcome = '${{ steps.extract.outcome }}';
+            const validateImagesOutcome = '${{ steps.validate_images.outcome }}';
+            const validatePlatformsOutcome = '${{ steps.validate_platforms.outcome }}';
+            const syncOutcome = '${{ steps.sync.outcome }}';
+
+            const finalStatus =
+              extractOutcome === 'success' &&
+              validateImagesOutcome === 'success' &&
+              validatePlatformsOutcome === 'success' &&
+              syncOutcome === 'success'
+                ? 'success'
+                : 'failed';
+
+            await ensureLabel('success', '0e8a16', 'Mirror sync completed successfully');
+            await ensureLabel('failed', 'd73a4a', 'Mirror sync failed');
+
+            const issue = await github.rest.issues.get({ owner, repo, issue_number });
+            const existing = issue.data.labels.map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
+            const next = [...new Set([...existing.filter(name => !statusLabels.has(name)), finalStatus])];
+            await github.rest.issues.setLabels({ owner, repo, issue_number, labels: next });
