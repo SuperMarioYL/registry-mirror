@@ -37,33 +37,81 @@ jobs:
             const fs = require('fs');
             const body = context.payload.issue.body || '';
 
-            const lines = body.split('\n')
-              .map(l => l.trim())
-              .filter(l => {
-                if (!l || l.startsWith('#') || l.startsWith('_') || l.startsWith('-  [')) return false;
-                return /^[a-zA-Z0-9]/.test(l) && l.includes(':');
-              });
+            const parseSections = (text) => {
+              const sections = {};
+              let current = '';
+              for (const line of text.split('\n')) {
+                if (line.startsWith('### ')) {
+                  current = line.replace(/^###\s*/, '').trim();
+                  sections[current] = [];
+                  continue;
+                }
+                if (current) {
+                  sections[current].push(line);
+                }
+              }
+              return sections;
+            };
 
-            const multiArch = /- \[[xX]\] Sync all architectures/.test(body);
+            const sections = parseSections(body);
+
+            const getSectionContent = (keys) => {
+              for (const [title, lines] of Object.entries(sections)) {
+                const lowerTitle = title.toLowerCase();
+                if (keys.some(k => lowerTitle.includes(k))) {
+                  return lines.join('\n').trim();
+                }
+              }
+              return '';
+            };
+
+            const normalizeImages = (raw) => raw
+              .split('\n')
+              .map(l => l.trim())
+              .map(l => l.replace(/^-+\s*/, ''))
+              .filter(l => l && l !== '_No response_' && !l.startsWith('```'));
+
+            const normalizePlatforms = (raw) => {
+              const normalized = raw
+                .replace(/_No response_/gi, '')
+                .split(/[\n,]+/)
+                .map(v => v.trim().toLowerCase())
+                .filter(Boolean);
+              return [...new Set(normalized)];
+            };
+
+            const imagesRaw = getSectionContent(['images', '镜像列表']);
+            const lines = normalizeImages(imagesRaw);
+            const platformsRaw = getSectionContent(['platforms', '平台列表']);
+            const platforms = normalizePlatforms(platformsRaw);
+            const finalPlatforms = platforms.length > 0 ? platforms : ['linux/amd64'];
 
             // Write images to file to avoid shell escaping issues
             fs.writeFileSync('/tmp/images.txt', lines.join('\n'));
+            fs.writeFileSync('/tmp/platforms.txt', finalPlatforms.join('\n'));
 
-            core.setOutput('multi_arch', multiArch ? 'true' : 'false');
             core.setOutput('count', lines.length.toString());
+            core.setOutput('platforms_csv', finalPlatforms.join(','));
+            core.setOutput('platforms_count', finalPlatforms.length.toString());
 
             if (lines.length === 0) {
               core.setFailed('No valid images found in issue body');
             }
 
       - name: Validate image format
-        id: validate
+        id: validate_images
         if: steps.extract.outcome == 'success'
         run: |
           .github/scripts/validate.sh < /tmp/images.txt
 
-      - name: Post validation failure
-        if: failure() && steps.validate.outcome == 'failure'
+      - name: Validate platform format
+        id: validate_platforms
+        if: steps.extract.outcome == 'success' && steps.validate_images.outcome == 'success'
+        run: |
+          .github/scripts/validate-platforms.sh < /tmp/platforms.txt
+
+      - name: Post image validation failure
+        if: failure() && steps.validate_images.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |
@@ -86,8 +134,31 @@ jobs:
               ].join('\n')
             });
 
+      - name: Post platform validation failure
+        if: failure() && steps.validate_platforms.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                '**Platform validation failed**',
+                '',
+                'Please provide platforms in `os/arch` or `os/arch/variant` format.',
+                '',
+                'Correct examples:',
+                '```',
+                'linux/amd64',
+                'linux/arm64',
+                'linux/arm/v7',
+                '```'
+              ].join('\n')
+            });
+
       - name: Add running label
-        if: steps.validate.outcome == 'success'
+        if: steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
@@ -99,21 +170,31 @@ jobs:
             });
 
       - name: Post start comment
-        if: steps.validate.outcome == 'success'
+        if: steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
             const count = '${{ steps.extract.outputs.count }}';
+            const platforms = '${{ steps.extract.outputs.platforms_csv }}';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `**Mirror started**\n\nProcessing ${count} image(s)...\n\n[View workflow run](${runUrl})`
+              body: `**Mirror started**\n\nProcessing ${count} image(s)...\n\nRequested platforms: \`${platforms}\`\n\n[View workflow run](${runUrl})`
             });
 
+      - name: Set up Docker Buildx
+        if: steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to target registry
+        if: steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
+        run: |
+          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | docker login "${{ env.TARGET_REGISTRY }}" --username "${{ vars.TARGET_REGISTRY_USER }}" --password-stdin
+
       - name: Run mirror sync
-        if: steps.validate.outcome == 'success'
+        if: steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
         id: sync
         run: |
           .github/scripts/mirror.sh \
@@ -121,11 +202,11 @@ jobs:
             "${{ env.TARGET_NAMESPACE }}" \
             "${{ vars.TARGET_REGISTRY_USER }}" \
             "${{ secrets.TARGET_REGISTRY_PASSWORD }}" \
-            "${{ steps.extract.outputs.multi_arch }}" \
+            "${{ steps.extract.outputs.platforms_csv }}" \
             < /tmp/images.txt
 
       - name: Post result comment
-        if: always() && steps.validate.outcome == 'success'
+        if: always() && steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
@@ -160,7 +241,7 @@ jobs:
             });
 
       - name: Label on success
-        if: steps.sync.outcome == 'success'
+        if: always() && steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success' && steps.sync.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
@@ -172,7 +253,7 @@ jobs:
             await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['success'] });
 
       - name: Label on failure
-        if: steps.sync.outcome == 'failure'
+        if: always() && steps.validate_images.outcome == 'success' && steps.validate_platforms.outcome == 'success' && steps.sync.outcome != 'success'
         uses: actions/github-script@v7
         with:
           script: |
