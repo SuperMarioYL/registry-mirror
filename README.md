@@ -52,15 +52,12 @@ registry.k8s.io/kube-apiserver:v1.28.0
 quay.io/prometheus/node-exporter:v1.7.0
 ```
 
-可选填写平台列表（逗号或换行分隔），例如：
+可选勾选平台（高频预置）：
+- `linux/amd64`
+- `linux/arm64`
+- `linux/arm/v7`
 
-```
-linux/amd64
-linux/arm64
-linux/arm/v7
-```
-
-平台列表留空时默认使用 `linux/amd64`。
+若不勾选平台，默认使用 `linux/amd64`。
 
 ### 5. 等待同步完成
 
@@ -96,7 +93,7 @@ linux/arm/v7
 - **并行同步**：默认 5 个并发，可通过 `MAX_PARALLEL` 环境变量调整
 - **逐镜像隔离**：单个镜像失败不影响其他镜像同步
 - **自动重试**：skopeo 原生重试机制，默认 3 次
-- **平台子集支持**：支持指定平台列表（如 `linux/amd64,linux/arm64`）
+- **平台子集支持**：支持勾选高频平台组合（如 `linux/amd64` + `linux/arm64`）
 - **缺失平台不失败**：请求平台不存在时记为 Warning，不中断整体任务
 - **自动报告**：Issue 评论中展示 Success/Warning/Failed 结果和耗时
 - **并发控制**：同一 Issue 同时只运行一个工作流
@@ -107,7 +104,7 @@ linux/arm/v7
 重新打开 Issue 即可触发重试。检查镜像名称和 tag 是否正确，源镜像是否可公开访问，目标仓库账号是否有推送权限。
 
 **Q: 如何同步多架构镜像？**
-在 Issue 的 Platforms 中列出要同步的平台，例如 `linux/amd64` 与 `linux/arm64`。不再提供“同步全部架构”复选框。
+在 Issue 的 Platforms 中勾选要同步的平台（如 `linux/amd64` 与 `linux/arm64`）。
 
 **Q: 请求了某个平台但源镜像没有，会失败吗？**
 不会。该镜像会记录为 Warning，并在报告中列出缺失平台；如果没有任何可用平台，会提示“未推送目标标签”。

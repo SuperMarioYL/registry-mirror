@@ -72,10 +72,23 @@ jobs:
               .filter(l => l && l !== '_No response_' && !l.startsWith('```'));
 
             const normalizePlatforms = (raw) => {
+              const lines = raw.split('\n').map(v => v.trim());
+              const checked = lines
+                .map(line => {
+                  const match = line.match(/^- \[[xX]\]\s+(.+)$/);
+                  return match ? match[1].trim().toLowerCase() : '';
+                })
+                .filter(Boolean);
+              if (checked.length > 0) {
+                return [...new Set(checked)];
+              }
+
+              // Backward-compatible fallback for manually edited issue body.
               const normalized = raw
                 .replace(/_No response_/gi, '')
                 .split(/[\n,]+/)
                 .map(v => v.trim().toLowerCase())
+                .map(v => v.replace(/^- \[[ xX]\]\s+/, ''))
                 .filter(Boolean);
               return [...new Set(normalized)];
             };

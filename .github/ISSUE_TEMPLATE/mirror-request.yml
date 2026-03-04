@@ -24,18 +24,17 @@ body:
         quay.io/prometheus/node-exporter:v1.7.0
     validations:
       required: true
-  - type: textarea
+  - type: checkboxes
     id: platforms
     attributes:
-      label: Platforms / 平台列表（可选）
+      label: Platforms / 平台（可选）
       description: |
-        Optional. Provide target platforms separated by comma or new line.
-        可选。目标平台支持逗号或换行分隔。
-        Leave empty to use default `linux/amd64`.
-        留空则默认使用 `linux/amd64`。
-      placeholder: |
-        linux/amd64
-        linux/arm64
-        linux/arm/v7
-    validations:
-      required: false
+        Optional. Select high-frequency platforms. Leave all unchecked to use default `linux/amd64`.
+        可选。勾选常用平台；若不勾选则默认使用 `linux/amd64`。
+      options:
+        - label: linux/amd64
+          required: false
+        - label: linux/arm64
+          required: false
+        - label: linux/arm/v7
+          required: false
