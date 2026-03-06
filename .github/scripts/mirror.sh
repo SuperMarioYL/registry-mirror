@@ -39,6 +39,23 @@ join_by_comma() {
   fi
 }
 
+join_by_semicolon() {
+  local result=""
+  for item in "$@"; do
+    [[ -z "$item" ]] && continue
+    if [[ -z "$result" ]]; then
+      result="$item"
+    else
+      result="${result}; ${item}"
+    fi
+  done
+  if [[ -z "$result" ]]; then
+    echo "-"
+  else
+    echo "$result"
+  fi
+}
+
 parse_platforms() {
   local csv="$1"
   local normalized
@@ -86,6 +103,38 @@ is_missing_platform_error() {
   return 1
 }
 
+classify_hard_error_cn() {
+  local output_lower
+  output_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "$output_lower" == *"manifest unknown"* ]]; then
+    echo "源镜像 tag 不存在或写错（manifest unknown）"
+    return
+  fi
+  if [[ "$output_lower" == *"requested access to the resource is denied"* ]]; then
+    echo "源镜像无权限访问，或镜像路径/仓库名不正确"
+    return
+  fi
+  if [[ "$output_lower" == *"unauthorized"* || "$output_lower" == *"authentication required"* ]]; then
+    echo "源镜像鉴权失败（未登录或凭据无效）"
+    return
+  fi
+  if [[ "$output_lower" == *"name unknown"* ]]; then
+    echo "源镜像仓库不存在（name unknown）"
+    return
+  fi
+  if [[ "$output_lower" == *"no such host"* || "$output_lower" == *"dial tcp"* || "$output_lower" == *"i/o timeout"* || "$output_lower" == *"tls handshake timeout"* ]]; then
+    echo "网络连接源仓库失败（DNS/网络超时）"
+    return
+  fi
+  if [[ "$output_lower" == *"toomanyrequests"* || "$output_lower" == *"429"* ]]; then
+    echo "源仓库访问频率受限（限流）"
+    return
+  fi
+
+  echo "未知错误，请查看原始日志"
+}
+
 cleanup_temp_refs() {
   local refs=("$@")
   for ref in "${refs[@]}"; do
@@ -98,6 +147,7 @@ build_details() {
   local missing="$2"
   local errors="$3"
   local action="$4"
+  local error_reasons="$5"
 
   local details=""
   if [[ "$copied" != "-" ]]; then
@@ -114,6 +164,10 @@ build_details() {
   if [[ -n "$action" && "$action" != "-" ]]; then
     if [[ -n "$details" ]]; then details="${details}; "; fi
     details="${details}action: ${action}"
+  fi
+  if [[ "$error_reasons" != "-" ]]; then
+    if [[ -n "$details" ]]; then details="${details}; "; fi
+    details="${details}error_reason_cn: ${error_reasons}"
   fi
 
   if [[ -z "$details" ]]; then
@@ -159,6 +213,7 @@ copy_image() {
   local -a copied_platforms=()
   local -a missing_platforms=()
   local -a error_platforms=()
+  local -a error_reason_items=()
   local -a temp_refs=()
   local copied_count=0
   local missing_count=0
@@ -166,6 +221,7 @@ copy_image() {
   local status="FAILED"
   local action="-"
   local publish_failed=0
+  local first_error_reason_cn=""
 
   for platform in "${PLATFORMS[@]-}"; do
     local os arch variant
@@ -197,11 +253,17 @@ copy_image() {
       if is_missing_platform_error "$copy_output"; then
         missing_platforms+=("$platform")
         missing_count=$((missing_count + 1))
-        log "[$index/$TOTAL] [$platform] WARN: platform not found for $source"
+        log "[$index/$TOTAL] [$platform] WARN: 请求的平台在源镜像中不存在"
       else
+        local reason_cn
+        reason_cn="$(classify_hard_error_cn "$copy_output")"
         error_platforms+=("$platform")
+        error_reason_items+=("${platform}:${reason_cn}")
         error_count=$((error_count + 1))
-        log_error "[$index/$TOTAL] [$platform] ERROR while copying $source"
+        if [[ -z "$first_error_reason_cn" ]]; then
+          first_error_reason_cn="$reason_cn"
+        fi
+        log_error "[$index/$TOTAL] [$platform] ERROR while copying $source | 原因: ${reason_cn}"
         echo "$copy_output" >&2
       fi
     fi
@@ -213,9 +275,13 @@ copy_image() {
     else
       publish_failed=1
       error_platforms+=("manifest-assemble")
+      error_reason_items+=("manifest-assemble:目标仓库组装多架构清单失败")
       error_count=$((error_count + 1))
       action="publish-failed"
-      log_error "[$index/$TOTAL] Failed to assemble multi-arch manifest for $source"
+      if [[ -z "$first_error_reason_cn" ]]; then
+        first_error_reason_cn="目标仓库组装多架构清单失败"
+      fi
+      log_error "[$index/$TOTAL] Failed to assemble multi-arch manifest for $source | 原因: 目标仓库组装多架构清单失败"
     fi
   elif [[ $copied_count -eq 1 ]]; then
     local finalize_output
@@ -230,9 +296,13 @@ copy_image() {
     else
       publish_failed=1
       error_platforms+=("finalize-copy")
+      error_reason_items+=("finalize-copy:目标标签发布失败")
       error_count=$((error_count + 1))
       action="publish-failed"
-      log_error "[$index/$TOTAL] Failed to publish final tag for $source"
+      if [[ -z "$first_error_reason_cn" ]]; then
+        first_error_reason_cn="目标标签发布失败"
+      fi
+      log_error "[$index/$TOTAL] Failed to publish final tag for $source | 原因: 目标标签发布失败"
       echo "$finalize_output" >&2
     fi
   else
@@ -259,19 +329,24 @@ copy_image() {
   end_time=$(date +%s)
   duration=$((end_time - start_time))
 
-  local copied_csv missing_csv errors_csv
+  local copied_csv missing_csv errors_csv error_reason_cn
   copied_csv="$(join_by_comma "${copied_platforms[@]-}")"
   missing_csv="$(join_by_comma "${missing_platforms[@]-}")"
   errors_csv="$(join_by_comma "${error_platforms[@]-}")"
+  error_reason_cn="$(join_by_semicolon "${error_reason_items[@]-}")"
 
-  echo "${status}|${source}|${target}|${duration}s|${copied_csv}|${missing_csv}|${errors_csv}|${action}" > "$result_file"
+  echo "${status}|${source}|${target}|${duration}s|${copied_csv}|${missing_csv}|${errors_csv}|${action}|${error_reason_cn}" > "$result_file"
 
   if [[ "$status" == "SUCCESS" ]]; then
     log "[$index/$TOTAL] SUCCESS: $source (${duration}s)"
   elif [[ "$status" == "WARN" ]]; then
     log "[$index/$TOTAL] WARN: $source (${duration}s)"
   else
-    log_error "[$index/$TOTAL] FAILED: $source (${duration}s)"
+    if [[ -n "$first_error_reason_cn" ]]; then
+      log_error "[$index/$TOTAL] FAILED: $source (${duration}s) | 主要原因: ${first_error_reason_cn}"
+    else
+      log_error "[$index/$TOTAL] FAILED: $source (${duration}s)"
+    fi
   fi
 }
 
@@ -302,8 +377,8 @@ fail_lines=""
 
 for result_file in "$RESULTS_DIR"/*.result; do
   [[ -f "$result_file" ]] || continue
-  IFS='|' read -r status source target duration copied missing errors action < "$result_file"
-  details="$(build_details "$copied" "$missing" "$errors" "$action")"
+  IFS='|' read -r status source target duration copied missing errors action error_reason_cn < "$result_file"
+  details="$(build_details "$copied" "$missing" "$errors" "$action" "${error_reason_cn:--}")"
   if [[ "$status" == "SUCCESS" ]]; then
     success_count=$((success_count + 1))
     success_lines+="| \`${source}\` | \`${target}\` | ${duration} | ${details} |\n"
@@ -339,8 +414,8 @@ done
     echo "|--------|--------|----------|---------|"
     echo -e "$warn_lines"
     echo ""
-    echo "> Warning does not fail the workflow. Common cases:"
-    echo "> missing requested platforms, or partial platform sync."
+    echo "> Warning 不会导致工作流失败。常见原因："
+    echo "> 请求的平台不存在，或仅部分平台同步成功。"
   fi
 
   if [[ $fail_count -gt 0 ]]; then
@@ -350,8 +425,8 @@ done
     echo "|--------|--------|----------|---------|"
     echo -e "$fail_lines"
     echo ""
-    echo "> **Tip**: Failed images indicate hard errors (network/auth/publish failures)."
-    echo "> You can re-open this issue to retry after fixing credentials or registry availability."
+    echo "> **提示**：Failed 表示硬错误（如网络、鉴权、目标仓库发布失败）。"
+    echo "> 修复后可重新打开 Issue 触发重试。"
   fi
 
   if [[ $fail_count -eq 0 && $warn_count -eq 0 ]]; then
