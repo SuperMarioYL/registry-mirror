@@ -103,10 +103,20 @@ is_missing_platform_error() {
   return 1
 }
 
+is_v2s2_conversion_error() {
+  local output_lower
+  output_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$output_lower" == *"unknown media type during manifest conversion"* ]]
+}
+
 classify_hard_error_cn() {
   local output_lower
   output_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
 
+  if [[ "$output_lower" == *"unknown media type during manifest conversion"* ]]; then
+    echo "源镜像无法转换为 v2s2 格式，请改用源 manifest 格式推送"
+    return
+  fi
   if [[ "$output_lower" == *"manifest unknown"* ]]; then
     echo "源镜像 tag 不存在或写错（manifest unknown）"
     return
@@ -133,6 +143,42 @@ classify_hard_error_cn() {
   fi
 
   echo "未知错误，请查看原始日志"
+}
+
+run_skopeo_copy_with_fallback() {
+  local output_var="$1"
+  local fallback_var="$2"
+  local source_ref="$3"
+  local target_ref="$4"
+  shift 4
+  local -a copy_args=("$@")
+  local primary_output fallback_output
+
+  if primary_output=$(skopeo copy \
+    "$source_ref" \
+    "$target_ref" \
+    --format v2s2 \
+    "${copy_args[@]}" 2>&1); then
+    printf -v "$output_var" '%s' "$primary_output"
+    printf -v "$fallback_var" '0'
+    return 0
+  fi
+
+  if is_v2s2_conversion_error "$primary_output"; then
+    if fallback_output=$(skopeo copy \
+      "$source_ref" \
+      "$target_ref" \
+      "${copy_args[@]}" 2>&1); then
+      printf -v "$output_var" '%s' "$fallback_output"
+      printf -v "$fallback_var" '1'
+      return 0
+    fi
+    primary_output="${primary_output}"$'\n'"${fallback_output}"
+  fi
+
+  printf -v "$output_var" '%s' "$primary_output"
+  printf -v "$fallback_var" '0'
+  return 1
 }
 
 cleanup_temp_refs() {
@@ -216,6 +262,7 @@ copy_image() {
   local -a error_reason_items=()
   local -a temp_refs=()
   local copied_count=0
+  local fallback_count=0
   local missing_count=0
   local error_count=0
   local status="FAILED"
@@ -228,7 +275,6 @@ copy_image() {
     IFS='|' read -r os arch variant < <(split_platform "$platform")
 
     local platform_copy_args=(
-      "--format" "v2s2"
       "--dest-creds" "${TARGET_USER}:${TARGET_PASSWORD}"
       "--src-no-creds"
       "--retry-times" "$RETRY_TIMES"
@@ -239,7 +285,7 @@ copy_image() {
       platform_copy_args+=("--override-variant" "$variant")
     fi
 
-    local safe_platform destination_ref copy_output
+    local safe_platform destination_ref copy_output used_format_fallback
     destination_ref="$target"
     if [[ $TOTAL_PLATFORMS -gt 1 ]]; then
       safe_platform="${platform//\//-}"
@@ -247,12 +293,17 @@ copy_image() {
       destination_ref="${target}-tmp-${RUN_KEY}-${index}-${safe_platform}"
     fi
 
-    if copy_output=$(skopeo copy "docker://${source}" "docker://${destination_ref}" "${platform_copy_args[@]}" 2>&1); then
+    if run_skopeo_copy_with_fallback copy_output used_format_fallback "docker://${source}" "docker://${destination_ref}" "${platform_copy_args[@]}"; then
       copied_platforms+=("$platform")
       if [[ $TOTAL_PLATFORMS -gt 1 ]]; then
         temp_refs+=("$destination_ref")
       fi
       copied_count=$((copied_count + 1))
+      if [[ $used_format_fallback -eq 1 ]]; then
+        fallback_count=$((fallback_count + 1))
+        error_reason_items+=("fallback-format:${platform} 使用源 manifest 格式推送（v2s2 转换不兼容）")
+        log "[$index/$TOTAL] [$platform] WARN: v2s2 conversion incompatible for $source on $platform, retrying with source manifest format"
+      fi
       log "[$index/$TOTAL] [$platform] COPIED: $source"
     else
       if is_missing_platform_error "$copy_output"; then
@@ -292,15 +343,19 @@ copy_image() {
     if [[ $TOTAL_PLATFORMS -eq 1 ]]; then
       action="pushed-single-arch"
     else
-      local finalize_output
-      if finalize_output=$(skopeo copy \
+      local finalize_output finalize_fallback
+      if run_skopeo_copy_with_fallback finalize_output finalize_fallback \
         "docker://${temp_refs[0]}" \
         "docker://${target}" \
-        --format v2s2 \
         --src-creds "${TARGET_USER}:${TARGET_PASSWORD}" \
         --dest-creds "${TARGET_USER}:${TARGET_PASSWORD}" \
-        --retry-times "$RETRY_TIMES" 2>&1); then
+        --retry-times "$RETRY_TIMES"; then
         action="pushed-single-arch"
+        if [[ $finalize_fallback -eq 1 ]]; then
+          fallback_count=$((fallback_count + 1))
+          error_reason_items+=("fallback-format:finalize-copy 使用源 manifest 格式发布最终标签（v2s2 转换不兼容）")
+          log "[$index/$TOTAL] WARN: v2s2 conversion incompatible while publishing final tag for $source, retrying with source manifest format"
+        fi
       else
         publish_failed=1
         error_platforms+=("finalize-copy")
@@ -327,7 +382,7 @@ copy_image() {
     fi
   elif [[ $publish_failed -eq 1 ]]; then
     status="FAILED"
-  elif [[ $missing_count -gt 0 || $error_count -gt 0 ]]; then
+  elif [[ $missing_count -gt 0 || $error_count -gt 0 || $fallback_count -gt 0 ]]; then
     status="WARN"
   else
     status="SUCCESS"
