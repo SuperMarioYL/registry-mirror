@@ -239,14 +239,19 @@ copy_image() {
       platform_copy_args+=("--override-variant" "$variant")
     fi
 
-    local safe_platform tmp_target copy_output
-    safe_platform="${platform//\//-}"
-    safe_platform="${safe_platform//./-}"
-    tmp_target="${target}-tmp-${RUN_KEY}-${index}-${safe_platform}"
+    local safe_platform destination_ref copy_output
+    destination_ref="$target"
+    if [[ $TOTAL_PLATFORMS -gt 1 ]]; then
+      safe_platform="${platform//\//-}"
+      safe_platform="${safe_platform//./-}"
+      destination_ref="${target}-tmp-${RUN_KEY}-${index}-${safe_platform}"
+    fi
 
-    if copy_output=$(skopeo copy "docker://${source}" "docker://${tmp_target}" "${platform_copy_args[@]}" 2>&1); then
+    if copy_output=$(skopeo copy "docker://${source}" "docker://${destination_ref}" "${platform_copy_args[@]}" 2>&1); then
       copied_platforms+=("$platform")
-      temp_refs+=("$tmp_target")
+      if [[ $TOTAL_PLATFORMS -gt 1 ]]; then
+        temp_refs+=("$destination_ref")
+      fi
       copied_count=$((copied_count + 1))
       log "[$index/$TOTAL] [$platform] COPIED: $source"
     else
@@ -284,32 +289,34 @@ copy_image() {
       log_error "[$index/$TOTAL] Failed to assemble multi-arch manifest for $source | 原因: 目标仓库组装多架构清单失败"
     fi
   elif [[ $copied_count -eq 1 ]]; then
-    local finalize_output
-    if finalize_output=$(skopeo copy \
-      "docker://${temp_refs[0]}" \
-      "docker://${target}" \
-      --format v2s2 \
-      --src-creds "${TARGET_USER}:${TARGET_PASSWORD}" \
-      --dest-creds "${TARGET_USER}:${TARGET_PASSWORD}" \
-      --retry-times "$RETRY_TIMES" 2>&1); then
+    if [[ $TOTAL_PLATFORMS -eq 1 ]]; then
       action="pushed-single-arch"
     else
-      publish_failed=1
-      error_platforms+=("finalize-copy")
-      error_reason_items+=("finalize-copy:目标标签发布失败")
-      error_count=$((error_count + 1))
-      action="publish-failed"
-      if [[ -z "$first_error_reason_cn" ]]; then
-        first_error_reason_cn="目标标签发布失败"
+      local finalize_output
+      if finalize_output=$(skopeo copy \
+        "docker://${temp_refs[0]}" \
+        "docker://${target}" \
+        --format v2s2 \
+        --src-creds "${TARGET_USER}:${TARGET_PASSWORD}" \
+        --dest-creds "${TARGET_USER}:${TARGET_PASSWORD}" \
+        --retry-times "$RETRY_TIMES" 2>&1); then
+        action="pushed-single-arch"
+      else
+        publish_failed=1
+        error_platforms+=("finalize-copy")
+        error_reason_items+=("finalize-copy:目标标签发布失败")
+        error_count=$((error_count + 1))
+        action="publish-failed"
+        if [[ -z "$first_error_reason_cn" ]]; then
+          first_error_reason_cn="目标标签发布失败"
+        fi
+        log_error "[$index/$TOTAL] Failed to publish final tag for $source | 原因: 目标标签发布失败"
+        echo "$finalize_output" >&2
       fi
-      log_error "[$index/$TOTAL] Failed to publish final tag for $source | 原因: 目标标签发布失败"
-      echo "$finalize_output" >&2
     fi
   else
     action="skipped-no-available-platform"
   fi
-
-  cleanup_temp_refs "${temp_refs[@]-}"
 
   if [[ $copied_count -eq 0 ]]; then
     if [[ $error_count -gt 0 ]]; then
@@ -324,6 +331,16 @@ copy_image() {
     status="WARN"
   else
     status="SUCCESS"
+  fi
+
+  if [[ ${#temp_refs[@]} -gt 0 ]]; then
+    if [[ $publish_failed -eq 1 || $copied_count -eq 0 ]]; then
+      cleanup_temp_refs "${temp_refs[@]-}"
+    else
+      # Some registries resolve the final tag to the same manifest as the staging
+      # tag. Deleting the staging tag would remove the shared manifest as well.
+      log "[$index/$TOTAL] Retaining staging tags for $source to keep the published manifest resolvable"
+    fi
   fi
 
   end_time=$(date +%s)
